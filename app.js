@@ -1,4 +1,4 @@
-// ===== 3 Segundos =====
+// ===== 3 Segundos (v2) =====
 const app = document.getElementById('app');
 const $ = id => document.getElementById(id);
 const ld = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
@@ -52,15 +52,17 @@ let AC;
 function ctx() { AC = AC || new (window.AudioContext || window.webkitAudioContext)(); if (AC.state === 'suspended') AC.resume(); return AC; }
 function tom(f, d = .12, tipo = 'sine', v = .2, at = 0) {
   if (!S.som) return;
-  const a = ctx(), t = a.currentTime + at, o = a.createOscillator(), g = a.createGain();
-  o.type = tipo; o.frequency.setValueAtTime(f, t);
-  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(.001, t + d);
-  o.connect(g).connect(a.destination); o.start(t); o.stop(t + d + .02);
+  try {
+    const a = ctx(), t = a.currentTime + at, o = a.createOscillator(), g = a.createGain();
+    o.type = tipo; o.frequency.setValueAtTime(f, t);
+    g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(.001, t + d);
+    o.connect(g).connect(a.destination); o.start(t); o.stop(t + d + .02);
+  } catch (e) { /* sem som, segue o jogo */ }
 }
 const SOM = {
   clique: () => tom(700, .05, 'triangle', .1),
-  tick: () => tom(1500, .015, 'square', .04),
   soltar: () => { tom(300, .06, 'triangle', .15); tom(500, .08, 'triangle', .15, .05); },
+  batida: k => { tom(1700 + k * 220, .035, 'square', .12); tom(520 + k * 60, .07, 'triangle', .18); },
   clack: () => { tom(2400, .03, 'square', .25); tom(110, .12, 'square', .3); },
   virar: () => { tom(400, .05, 'triangle', .12); tom(800, .07, 'triangle', .12, .05); },
   parar: () => { tom(988, .08, 'square', .15); tom(1319, .15, 'square', .15, .07); },
@@ -223,34 +225,78 @@ function telaCarta() {
 }
 
 // ---------- pista / timer ----------
+// pontos da pista: início, 4 batidas nas paredes, fim (ímã)
+const PONTOS = [[100, 30], [165, 95], [35, 175], [165, 255], [35, 335], [100, 385]];
+
 function pistaSVG() {
+  const d = 'M' + PONTOS.map(p => p.join(' ')).join(' L');
   return `<svg id="pista" viewBox="0 0 200 420">
     <defs><radialGradient id="metal" cx="35%" cy="30%"><stop offset="0" stop-color="#fff"/><stop offset=".45" stop-color="#9aa3ad"/><stop offset="1" stop-color="#2b3036"/></radialGradient></defs>
     <rect x="10" y="5" width="180" height="410" rx="18" fill="#27c3e6"/>
-    <path id="trilho" d="M100 30 L165 95 L35 175 L165 255 L35 335 L100 385" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="${d}" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
     <rect x="78" y="390" width="44" height="16" rx="4" fill="#4b5563"/>
     <circle id="bola" cx="100" cy="30" r="12" fill="url(#metal)"/>
   </svg>`;
 }
 
 function rodarPista(dur, onEnd) {
-  const path = $('trilho'), bola = $('bola'), cont = $('cont');
-  const L = path.getTotalLength(), t0 = performance.now();
-  let ativo = true, ult = 0;
-  function f(now) {
-    if (!ativo) return;
-    const el = (now - t0) / 1000, fr = Math.min(1, el / dur);
-    const p = path.getPointAtLength(L * Math.pow(fr, 1.35)); // acelera, como a gravidade
-    bola.setAttribute('cx', p.x); bola.setAttribute('cy', p.y);
-    cont.textContent = Math.max(0, dur - el).toFixed(1).replace('.', ',');
-    if (el - ult > .25) { ult = el; SOM.tick(); }
-    if (fr >= 1) { ativo = false; S.timer = null; SOM.clack(); vib(200); onEnd(); return; }
-    requestAnimationFrame(f);
+  const bola = $('bola'), cont = $('cont');
+
+  // mede cada trecho da pista
+  const trechos = []; let L = 0;
+  for (let k = 1; k < PONTOS.length; k++) {
+    const [x1, y1] = PONTOS[k - 1], [x2, y2] = PONTOS[k], l = Math.hypot(x2 - x1, y2 - y1);
+    trechos.push({ x1, y1, x2, y2, ini: L, l }); L += l;
   }
-  requestAnimationFrame(f);
+  const quinas = trechos.slice(1).map(t => t.ini); // onde a bolinha bate na parede
+
+  function pos(dist) {
+    const t = trechos.find(s => dist <= s.ini + s.l) || trechos[trechos.length - 1];
+    const f = Math.min(1, Math.max(0, (dist - t.ini) / t.l));
+    return [t.x1 + (t.x2 - t.x1) * f, t.y1 + (t.y2 - t.y1) * f];
+  }
+  function quique() {
+    bola.setAttribute('r', 14.5);
+    setTimeout(() => bola && bola.setAttribute('r', 12), 70);
+  }
+
+  const t0 = performance.now();
+  let ativo = true, prox = 0, raf = 0, seguro = 0;
+
+  function parar_() { ativo = false; cancelAnimationFrame(raf); clearTimeout(seguro); S.timer = null; }
+
+  function terminar() {
+    if (!ativo) return;
+    parar_();
+    const [x, y] = PONTOS[PONTOS.length - 1];
+    bola.setAttribute('cx', x); bola.setAttribute('cy', y);
+    cont.textContent = '0,0';
+    SOM.clack(); vib(200);
+    onEnd();
+  }
+
+  function quadro() {
+    if (!ativo) return;
+    const el = Math.max(0, (performance.now() - t0) / 1000); // nunca negativo
+    const fr = Math.min(1, el / dur);
+    const dist = L * Math.pow(fr, 1.35); // acelera, como a gravidade
+    const [x, y] = pos(dist);
+    bola.setAttribute('cx', x); bola.setAttribute('cy', y);
+    cont.textContent = Math.max(0, dur - el).toFixed(1).replace('.', ',');
+
+    while (prox < quinas.length && dist >= quinas[prox]) { // bateu na parede!
+      SOM.batida(prox); vib(15); quique(); prox++;
+    }
+    if (fr >= 1) return terminar();
+    raf = requestAnimationFrame(quadro);
+  }
+
+  seguro = setTimeout(terminar, dur * 1000 + 300); // trava de segurança
+  raf = requestAnimationFrame(quadro);
+
   return {
-    parar() { if (!ativo) return null; ativo = false; S.timer = null; return (performance.now() - t0) / 1000; },
-    cancelar() { ativo = false; }
+    parar() { if (!ativo) return null; parar_(); return (performance.now() - t0) / 1000; },
+    cancelar() { parar_(); }
   };
 }
 
@@ -268,7 +314,7 @@ function telaPista(modo) {
 }
 
 function fimTempoLance() {
-  $('cont').textContent = '⏰';
+  if ($('cont')) $('cont').textContent = '⏰';
   const tk = S.r;
   setTimeout(() => { if (S.r === tk && $('pista')) telaLances(); }, 700);
 }
